@@ -84,7 +84,7 @@ class GeminiEmbeddingFunction(EmbeddingFunction):
 
 
 class ChromaClient:
-    """ChromaDB client for Zotero semantic search."""
+    """ChromaDB client for Zotero semantic search with multi-collection support."""
     
     def __init__(self, 
                  collection_name: str = "zotero_library",
@@ -95,7 +95,7 @@ class ChromaClient:
         Initialize ChromaDB client.
         
         Args:
-            collection_name: Name of the ChromaDB collection
+            collection_name: Base name for ChromaDB collections
             persist_directory: Directory to persist the database
             embedding_model: Model to use for embeddings ('default', 'openai', 'gemini')
             embedding_config: Configuration for the embedding model
@@ -125,11 +125,26 @@ class ChromaClient:
         # Set up embedding function
         self.embedding_function = self._create_embedding_function()
         
-        # Get or create collection
-        self.collection = self.client.get_or_create_collection(
-            name=self.collection_name,
-            embedding_function=self.embedding_function
-        )
+        # Initialize collections
+        self.collections = {}
+        self._init_collections()
+    
+    def _init_collections(self) -> None:
+        """Initialize all required collections."""
+        collection_configs = {
+            "items": self.collection_name,  # Original metadata collection
+            "fulltext": f"{self.collection_name}_fulltext",  # PDF text chunks
+            "annotations": f"{self.collection_name}_annotations"  # PDF annotations
+        }
+        
+        for collection_type, name in collection_configs.items():
+            self.collections[collection_type] = self.client.get_or_create_collection(
+                name=name,
+                embedding_function=self.embedding_function
+            )
+        
+        # Maintain backward compatibility
+        self.collection = self.collections["items"]
     
     def _create_embedding_function(self) -> EmbeddingFunction:
         """Create the appropriate embedding function based on configuration."""
@@ -150,133 +165,231 @@ class ChromaClient:
     def add_documents(self, 
                      documents: List[str], 
                      metadatas: List[Dict[str, Any]], 
-                     ids: List[str]) -> None:
+                     ids: List[str],
+                     collection_type: str = "items") -> None:
         """
-        Add documents to the collection.
+        Add documents to the specified collection.
         
         Args:
             documents: List of document texts to embed
             metadatas: List of metadata dictionaries for each document
             ids: List of unique IDs for each document
+            collection_type: Type of collection ('items', 'fulltext', 'annotations')
         """
         try:
-            self.collection.add(
+            collection = self.collections.get(collection_type, self.collection)
+            collection.add(
                 documents=documents,
                 metadatas=metadatas,
                 ids=ids
             )
-            logger.info(f"Added {len(documents)} documents to ChromaDB collection")
+            logger.info(f"Added {len(documents)} documents to {collection_type} collection")
         except Exception as e:
-            logger.error(f"Error adding documents to ChromaDB: {e}")
+            logger.error(f"Error adding documents to {collection_type} collection: {e}")
             raise
     
     def upsert_documents(self,
                         documents: List[str],
                         metadatas: List[Dict[str, Any]],
-                        ids: List[str]) -> None:
+                        ids: List[str],
+                        collection_type: str = "items") -> None:
         """
-        Upsert (update or insert) documents to the collection.
+        Upsert (update or insert) documents to the specified collection.
         
         Args:
             documents: List of document texts to embed
             metadatas: List of metadata dictionaries for each document
             ids: List of unique IDs for each document
+            collection_type: Type of collection ('items', 'fulltext', 'annotations')
         """
         try:
-            self.collection.upsert(
+            collection = self.collections.get(collection_type, self.collection)
+            collection.upsert(
                 documents=documents,
                 metadatas=metadatas,
                 ids=ids
             )
-            logger.info(f"Upserted {len(documents)} documents to ChromaDB collection")
+            logger.info(f"Upserted {len(documents)} documents to {collection_type} collection")
         except Exception as e:
-            logger.error(f"Error upserting documents to ChromaDB: {e}")
+            logger.error(f"Error upserting documents to {collection_type} collection: {e}")
             raise
     
     def search(self, 
                query_texts: List[str], 
                n_results: int = 10,
                where: Optional[Dict[str, Any]] = None,
-               where_document: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+               where_document: Optional[Dict[str, Any]] = None,
+               collection_type: str = "items") -> Dict[str, Any]:
         """
-        Search for similar documents.
+        Search for similar documents in the specified collection.
         
         Args:
             query_texts: List of query texts
             n_results: Number of results to return
             where: Metadata filter conditions
             where_document: Document content filter conditions
+            collection_type: Type of collection to search ('items', 'fulltext', 'annotations')
             
         Returns:
             Search results from ChromaDB
         """
         try:
-            results = self.collection.query(
+            collection = self.collections.get(collection_type, self.collection)
+            results = collection.query(
                 query_texts=query_texts,
                 n_results=n_results,
                 where=where,
                 where_document=where_document
             )
-            logger.info(f"Semantic search returned {len(results.get('ids', [[]])[0])} results")
+            logger.info(f"Semantic search in {collection_type} returned {len(results.get('ids', [[]])[0])} results")
             return results
         except Exception as e:
-            logger.error(f"Error performing semantic search: {e}")
+            logger.error(f"Error performing semantic search in {collection_type}: {e}")
             raise
     
-    def delete_documents(self, ids: List[str]) -> None:
+    def search_all_collections(self,
+                              query_texts: List[str],
+                              n_results: int = 10,
+                              where: Optional[Dict[str, Any]] = None) -> Dict[str, Dict[str, Any]]:
         """
-        Delete documents from the collection.
+        Search across all collections and return combined results.
+        
+        Args:
+            query_texts: List of query texts
+            n_results: Number of results to return per collection
+            where: Metadata filter conditions
+            
+        Returns:
+            Dictionary with results from each collection
+        """
+        results = {}
+        
+        for collection_type in self.collections.keys():
+            try:
+                collection_results = self.search(
+                    query_texts=query_texts,
+                    n_results=n_results,
+                    where=where,
+                    collection_type=collection_type
+                )
+                results[collection_type] = collection_results
+            except Exception as e:
+                logger.error(f"Error searching {collection_type} collection: {e}")
+                results[collection_type] = {"ids": [[]], "distances": [[]], "documents": [[]], "metadatas": [[]]}
+        
+        return results
+    
+    def delete_documents(self, ids: List[str], collection_type: str = "items") -> None:
+        """
+        Delete documents from the specified collection.
         
         Args:
             ids: List of document IDs to delete
+            collection_type: Type of collection ('items', 'fulltext', 'annotations')
         """
         try:
-            self.collection.delete(ids=ids)
-            logger.info(f"Deleted {len(ids)} documents from ChromaDB collection")
+            collection = self.collections.get(collection_type, self.collection)
+            collection.delete(ids=ids)
+            logger.info(f"Deleted {len(ids)} documents from {collection_type} collection")
         except Exception as e:
-            logger.error(f"Error deleting documents from ChromaDB: {e}")
+            logger.error(f"Error deleting documents from {collection_type} collection: {e}")
             raise
     
-    def get_collection_info(self) -> Dict[str, Any]:
-        """Get information about the collection."""
+    def delete_item_from_all_collections(self, item_key: str) -> None:
+        """
+        Delete an item and all its related data from all collections.
+        
+        Args:
+            item_key: Zotero item key
+        """
+        for collection_type in self.collections.keys():
+            try:
+                # For fulltext and annotations, we need to find and delete related documents
+                if collection_type in ["fulltext", "annotations"]:
+                    # Find documents related to this item
+                    collection = self.collections[collection_type]
+                    results = collection.get(where={"item_key": item_key})
+                    if results["ids"]:
+                        collection.delete(ids=results["ids"])
+                        logger.info(f"Deleted {len(results['ids'])} {collection_type} documents for item {item_key}")
+                else:
+                    # For items collection, delete by item key directly
+                    self.delete_documents([item_key], collection_type)
+            except Exception as e:
+                logger.error(f"Error deleting {item_key} from {collection_type} collection: {e}")
+    
+    def document_exists(self, doc_id: str, collection_type: str = "items") -> bool:
+        """Check if a document exists in the specified collection."""
         try:
-            count = self.collection.count()
+            collection = self.collections.get(collection_type, self.collection)
+            result = collection.get(ids=[doc_id])
+            return len(result['ids']) > 0
+        except Exception:
+            return False
+    
+    def get_collection_info(self) -> Dict[str, Any]:
+        """Get information about all collections."""
+        try:
+            collection_info = {}
+            total_count = 0
+            
+            for collection_type, collection in self.collections.items():
+                try:
+                    count = collection.count()
+                    collection_info[collection_type] = {
+                        "name": collection.name,
+                        "count": count
+                    }
+                    total_count += count
+                except Exception as e:
+                    collection_info[collection_type] = {
+                        "name": f"{self.collection_name}_{collection_type}",
+                        "count": 0,
+                        "error": str(e)
+                    }
+            
             return {
-                "name": self.collection_name,
-                "count": count,
+                "base_name": self.collection_name,
+                "total_count": total_count,
                 "embedding_model": self.embedding_model,
-                "persist_directory": self.persist_directory
+                "persist_directory": self.persist_directory,
+                "collections": collection_info
             }
         except Exception as e:
             logger.error(f"Error getting collection info: {e}")
             return {
-                "name": self.collection_name,
-                "count": 0,
+                "base_name": self.collection_name,
+                "total_count": 0,
                 "embedding_model": self.embedding_model,
                 "persist_directory": self.persist_directory,
                 "error": str(e)
             }
     
-    def reset_collection(self) -> None:
-        """Reset (clear) the collection."""
+    def reset_collection(self, collection_type: Optional[str] = None) -> None:
+        """Reset (clear) collections."""
         try:
-            self.client.delete_collection(name=self.collection_name)
-            self.collection = self.client.create_collection(
-                name=self.collection_name,
-                embedding_function=self.embedding_function
-            )
-            logger.info(f"Reset ChromaDB collection '{self.collection_name}'")
+            if collection_type:
+                # Reset specific collection
+                if collection_type in self.collections:
+                    collection_name = self.collections[collection_type].name
+                    self.client.delete_collection(name=collection_name)
+                    self.collections[collection_type] = self.client.create_collection(
+                        name=collection_name,
+                        embedding_function=self.embedding_function
+                    )
+                    logger.info(f"Reset {collection_type} collection")
+                    
+                    # Update backward compatibility reference
+                    if collection_type == "items":
+                        self.collection = self.collections["items"]
+            else:
+                # Reset all collections
+                for ctype in list(self.collections.keys()):
+                    self.reset_collection(ctype)
+                logger.info("Reset all collections")
         except Exception as e:
-            logger.error(f"Error resetting collection: {e}")
+            logger.error(f"Error resetting collections: {e}")
             raise
-    
-    def document_exists(self, doc_id: str) -> bool:
-        """Check if a document exists in the collection."""
-        try:
-            result = self.collection.get(ids=[doc_id])
-            return len(result['ids']) > 0
-        except Exception:
-            return False
 
 
 def create_chroma_client(config_path: Optional[str] = None) -> ChromaClient:

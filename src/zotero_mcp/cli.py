@@ -288,10 +288,26 @@ def main():
             print("=== Semantic Search Database Status ===")
             
             collection_info = status.get("collection_info", {})
-            print(f"Collection: {collection_info.get('name', 'Unknown')}")
-            print(f"Document count: {collection_info.get('count', 0)}")
-            print(f"Embedding model: {collection_info.get('embedding_model', 'Unknown')}")
-            print(f"Database path: {collection_info.get('persist_directory', 'Unknown')}")
+            
+            # Handle new multi-collection format
+            if "collections" in collection_info:
+                print(f"Base collection: {collection_info.get('base_name', 'Unknown')}")
+                print(f"Total documents: {collection_info.get('total_count', 0)}")
+                print(f"Embedding model: {collection_info.get('embedding_model', 'Unknown')}")
+                print(f"Database path: {collection_info.get('persist_directory', 'Unknown')}")
+                
+                print(f"\nCollection breakdown:")
+                for ctype, cinfo in collection_info.get('collections', {}).items():
+                    if 'error' not in cinfo:
+                        print(f"- {ctype}: {cinfo.get('count', 0)} documents")
+                    else:
+                        print(f"- {ctype}: Error - {cinfo['error']}")
+            else:
+                # Fallback for old format
+                print(f"Collection: {collection_info.get('name', 'Unknown')}")
+                print(f"Document count: {collection_info.get('count', 0)}")
+                print(f"Embedding model: {collection_info.get('embedding_model', 'Unknown')}")
+                print(f"Database path: {collection_info.get('persist_directory', 'Unknown')}")
             
             update_config = status.get("update_config", {})
             print(f"\nUpdate configuration:")

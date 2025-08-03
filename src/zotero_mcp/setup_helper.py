@@ -261,7 +261,76 @@ def setup_semantic_search(existing_semantic_config: dict = None, semantic_config
         }
         print(f"Database will be updated every {days} days.")
     
+    # Configure fulltext processing
+    print("\n=== Full-Text Processing Configuration ===")
+    print("Enable full-text PDF processing for semantic search?")
+    print("This will extract and index content from PDF attachments.")
+    print("1. Yes - Enable full-text processing (recommended)")
+    print("2. No - Only index metadata (faster, less comprehensive)")
+    
+    while True:
+        fulltext_choice = input("\nEnable full-text processing? (1-2): ").strip()
+        if fulltext_choice in ["1", "2"]:
+            break
+        print("Please enter 1 or 2")
+    
+    fulltext_config = {
+        "enabled": fulltext_choice == "1",
+        "chunk_size": 1000,
+        "chunk_overlap": 200,
+        "max_chunks_per_item": 50,
+        "include_annotations": True
+    }
+    
+    if fulltext_choice == "1":
+        print("\nFull-text processing enabled with default settings:")
+        print("- Chunk size: 1000 tokens")
+        print("- Chunk overlap: 200 tokens")
+        print("- Max chunks per item: 50")
+        print("- Include PDF annotations: Yes")
+        
+        # Option to customize settings
+        customize = input("\nCustomize these settings? (y/N): ").strip().lower()
+        if customize in ["y", "yes"]:
+            print("\n=== Full-Text Processing Advanced Settings ===")
+            
+            while True:
+                try:
+                    chunk_size = int(input(f"Chunk size in tokens ({fulltext_config['chunk_size']}): ").strip() or fulltext_config['chunk_size'])
+                    if 100 <= chunk_size <= 5000:
+                        fulltext_config['chunk_size'] = chunk_size
+                        break
+                    print("Chunk size must be between 100 and 5000 tokens")
+                except ValueError:
+                    print("Please enter a valid number")
+            
+            while True:
+                try:
+                    overlap = int(input(f"Chunk overlap in tokens ({fulltext_config['chunk_overlap']}): ").strip() or fulltext_config['chunk_overlap'])
+                    if 0 <= overlap <= chunk_size // 2:
+                        fulltext_config['chunk_overlap'] = overlap
+                        break
+                    print(f"Overlap must be between 0 and {chunk_size // 2} tokens")
+                except ValueError:
+                    print("Please enter a valid number")
+            
+            while True:
+                try:
+                    max_chunks = int(input(f"Max chunks per item ({fulltext_config['max_chunks_per_item']}): ").strip() or fulltext_config['max_chunks_per_item'])
+                    if 1 <= max_chunks <= 200:
+                        fulltext_config['max_chunks_per_item'] = max_chunks
+                        break
+                    print("Max chunks must be between 1 and 200")
+                except ValueError:
+                    print("Please enter a valid number")
+            
+            annotations = input(f"Include PDF annotations? (Y/n): ").strip().lower()
+            fulltext_config['include_annotations'] = annotations not in ["n", "no"]
+    else:
+        print("Full-text processing disabled. Only metadata will be indexed.")
+    
     config["update_config"] = update_config
+    config["fulltext"] = fulltext_config
     
     return config
 
