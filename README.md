@@ -227,8 +227,8 @@ zotero-mcp setup --no-local --api-key YOUR_API_KEY --library-id YOUR_LIBRARY_ID
 
 **Zotero Connection:**
 - `ZOTERO_LOCAL=true`: Use the local Zotero API (default: false)
-- `ZOTERO_API_KEY`: Your Zotero API key (for web API)
-- `ZOTERO_LIBRARY_ID`: Your Zotero library ID (for web API)
+- `ZOTERO_API_KEY`: Your Zotero API key (for web API or local group libraries)
+- `ZOTERO_LIBRARY_ID`: Your Zotero library ID (for web API or local group libraries)
 - `ZOTERO_LIBRARY_TYPE`: The type of library (user or group, default: user)
 
 **Semantic Search:**
