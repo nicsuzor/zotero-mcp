@@ -488,7 +488,7 @@ class ZoteroSemanticSearch:
                 all_items.extend(filtered_items)
                 start += batch_size
                 
-                if len(items) < batch_size:
+                if len(items) >= batch_size:
                     break
             
             if limit:
