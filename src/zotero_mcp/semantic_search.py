@@ -12,8 +12,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 import logging
-
+import semchunk
 from pyzotero import zotero
+
+from zotero_mcp.server import get_item_fulltext
 
 from .chroma_client import ChromaClient, create_chroma_client
 from .client import get_zotero_client
@@ -90,49 +92,75 @@ class ZoteroSemanticSearch:
         except Exception as e:
             logger.error(f"Error saving update config: {e}")
     
-    def _create_document_text(self, item: Dict[str, Any]) -> str:
+    def _process_item_fulltext(self, item: Dict[str, Any]) -> Tuple[List[str], List[Dict[str, Any]], List[str]]:
         """
-        Create searchable text from a Zotero item.
+        Process fulltext content for a Zotero item.
         
         Args:
             item: Zotero item dictionary
             
         Returns:
-            Combined text for embedding
-        """
-        data = item.get("data", {})
+            Tuple of (documents, metadatas, ids) for fulltext chunks
+        """        
+        item_key = item.get("key", "")
+        if not item_key:
+            return [], [], []
         
-        # Extract key fields for semantic search
-        title = data.get("title", "")
-        abstract = data.get("abstractNote", "")
+        # Get attachment details
+        fulltext = get_item_fulltext(item_key, ctx)
+        if not fulltext or not fulltext.strip():
+            logger.debug(f"No suitable attachment text found for item {item_key}")
+            return [], [], []
         
-        # Format creators as text
-        creators = data.get("creators", [])
-        creators_text = format_creators(creators)
-        
-        # Additional searchable content
-        extra_fields = []
-        
-        # Publication details
-        if publication := data.get("publicationTitle"):
-            extra_fields.append(publication)
-        
-        # Tags
-        if tags := data.get("tags"):
-            tag_text = " ".join([tag.get("tag", "") for tag in tags])
-            extra_fields.append(tag_text)
-        
-        # Note content (if available)
-        if note := data.get("note"):
-            # Clean HTML from notes
-            import re
-            note_text = re.sub(r'<[^>]+>', '', note)
-            extra_fields.append(note_text)
-        
-        # Combine all text fields
-        text_parts = [title, creators_text, abstract] + extra_fields
-        return " ".join(filter(None, text_parts))
+        try:
+            # Chunk the text
+            chunks = self.text_chunker.chunk_text(fulltext)
+            
+            if not chunks:
+                return [], [], []
+            
+            # Prepare documents and metadata
+            documents = []
+            metadatas = []
+            ids = []
+            
+            base_metadata = self._create_metadata(item)
+            
+            for i, (chunk, offset) in enumerate(chunks):
+                # Create chunk-specific metadata
+                chunk_id =  f"{item_key}_fulltext_{i}"
+                chunk_metadata = base_metadata.copy()
+                chunk_metadata.update({
+                    "chunk_id": chunk_id,
+                    "chunk_offset": offset,
+                    "chunk_total": len(chunks[0]),
+                    "content_type": "fulltext"
+                })
+                
+                documents.append(chunk)
+                metadatas.append(chunk_metadata)
+                ids.append(chunk_id)
+            
+            logger.info(f"Created {len(documents)} fulltext chunks for item {item_key}")
+            return documents, metadatas, ids
+            
+        except Exception as e:
+            logger.error(f"Error processing fulltext for item {item_key}: {e}")
+            return [], [], []
     
+    
+    def _create_chunks(self, text) -> Tuple[List[str], List[int]]:
+        # Roughly 750 words per chunk, with 250 word overlap
+        chunk_size = 1000
+        overlap = 250
+        chunker = semchunk.chunkerify('cl100k_base', chunk_size)
+
+        # Pass an `offsets` argument to return the offsets of chunks, as well as an `overlap`
+        # argument to overlap chunks by a ratio (if < 1) or an absolute number of tokens (if >= 1).
+        chunks, offsets = chunker(text, offsets = True, overlap = overlap)
+
+        return chunks, offsets
+
     def _create_metadata(self, item: Dict[str, Any]) -> Dict[str, Any]:
         """
         Create metadata for a Zotero item.
@@ -328,17 +356,15 @@ class ZoteroSemanticSearch:
                     stats["skipped"] += 1
                     continue
                 
-                # Create document text and metadata
-                doc_text = self._create_document_text(item)
-                metadata = self._create_metadata(item)
+                chunk_texts, chunk_metadatas, chunk_ids = self._process_item_fulltext(item)
                 
-                if not doc_text.strip():
+                if len(chunk_texts) == 0:
                     stats["skipped"] += 1
                     continue
                 
-                documents.append(doc_text)
-                metadatas.append(metadata)
-                ids.append(item_key)
+                documents.append(chunk_texts)
+                metadatas.append(chunk_metadatas)
+                ids.append(chunk_ids)
                 
                 stats["processed"] += 1
                 
