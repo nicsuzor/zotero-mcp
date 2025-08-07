@@ -15,6 +15,7 @@ import chromadb
 from chromadb import Documents, EmbeddingFunction, Embeddings
 from chromadb.config import Settings
 
+from google import genai
 logger = logging.getLogger(__name__)
 
 
@@ -47,40 +48,43 @@ class OpenAIEmbeddingFunction(EmbeddingFunction):
 
 
 class GeminiEmbeddingFunction(EmbeddingFunction):
-    """Custom Gemini embedding function for ChromaDB using google-genai."""
-    
-    def __init__(self, model_name: str = "models/text-embedding-004", api_key: Optional[str] = None):
-        self.model_name = model_name
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not self.api_key:
-            raise ValueError("Gemini API key is required")
+    def __init__(
+        self,
+        model_name: str,
+        dimensionality: int = 3072,
+    ):
+        self.dimensionality = dimensionality
+        self.client = genai.Client()
+        self._embedding_model = model_name
+        self._current_title = None  # Store title for current batch
         
-        try:
-            from google import genai
-            from google.genai import types
-            self.client = genai.Client(api_key=self.api_key)
-            self.types = types
-        except ImportError:
-            raise ImportError("google-genai package is required for Gemini embeddings")
-    
-    def name(self) -> str:
-        """Return the name of this embedding function."""
-        return "gemini"
-    
+    def set_title(self, title: str) -> None:
+        """Set the title to use for the next embedding batch."""
+        self._current_title = title
+        
     def __call__(self, input: Documents) -> Embeddings:
-        """Generate embeddings using Gemini API."""
+        config_params = {
+            "task_type": "retrieval_document",
+            "output_dimensionality": self.dimensionality
+        }
+        
+        # Add title if available
+        if self._current_title:
+            config_params["title"] = self._current_title
+            
+        response = self.client.models.embed_content(
+            model=self._embedding_model,
+            contents=input,
+            config=genai.types.EmbedContentConfig(**config_params)
+        )
+
+        # Extract embeddings from response
         embeddings = []
-        for text in input:
-            response = self.client.models.embed_content(
-                model=self.model_name,
-                contents=[text],
-                config=self.types.EmbedContentConfig(
-                    task_type="retrieval_document",
-                    title="Zotero library document"
-                )
-            )
-            embeddings.append(response.embeddings[0].values)
+        for embedding in response.embeddings:
+            embeddings.append(embedding.values)
+        
         return embeddings
+  
 
 
 class ChromaClient:
@@ -139,9 +143,9 @@ class ChromaClient:
             return OpenAIEmbeddingFunction(model_name=model_name, api_key=api_key)
         
         elif self.embedding_model == "gemini":
-            model_name = self.embedding_config.get("model_name", "models/text-embedding-004")
-            api_key = self.embedding_config.get("api_key")
-            return GeminiEmbeddingFunction(model_name=model_name, api_key=api_key)
+            model_name = self.embedding_config.get("model_name", "gemini-embedding-001")
+            dimensionality = self.embedding_config.get("dimensionality", 3072)
+            return GeminiEmbeddingFunction(model_name=model_name, dimensionality=dimensionality)
         
         else:
             # Use ChromaDB's default embedding function (all-MiniLM-L6-v2)

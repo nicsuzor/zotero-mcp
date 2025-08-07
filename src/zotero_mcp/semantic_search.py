@@ -15,10 +15,10 @@ import logging
 import semchunk
 from pyzotero import zotero
 
-from zotero_mcp.server import get_item_fulltext
+from zotero_mcp.server import format_item_metadata, get_item_fulltext
 
 from .chroma_client import ChromaClient, create_chroma_client
-from .client import get_zotero_client
+from .client import convert_to_markdown, get_attachment_details, get_zotero_client
 from .utils import format_creators
 
 logger = logging.getLogger(__name__)
@@ -107,33 +107,31 @@ class ZoteroSemanticSearch:
             return [], [], []
         
         # Get attachment details
-        fulltext = get_item_fulltext(item_key, ctx)
+        fulltext = self._get_fulltext(item)
         if not fulltext or not fulltext.strip():
             logger.debug(f"No suitable attachment text found for item {item_key}")
             return [], [], []
         
         try:
-            # Chunk the text
-            chunks = self.text_chunker.chunk_text(fulltext)
-            
-            if not chunks:
-                return [], [], []
-            
             # Prepare documents and metadata
             documents = []
             metadatas = []
             ids = []
-            
+
             base_metadata = self._create_metadata(item)
+
+            # Chunk the text
+            chunks_data, offsets = self._create_chunks(fulltext)
             
-            for i, (chunk, offset) in enumerate(chunks):
+            for i, (chunk, offset) in enumerate(zip(chunks_data, offsets)):
+
                 # Create chunk-specific metadata
                 chunk_id =  f"{item_key}_fulltext_{i}"
                 chunk_metadata = base_metadata.copy()
                 chunk_metadata.update({
                     "chunk_id": chunk_id,
-                    "chunk_offset": offset,
-                    "chunk_total": len(chunks[0]),
+                    "chunk_offset": str(offset),
+                    "chunk_total": len(chunk),
                     "content_type": "fulltext"
                 })
                 
@@ -148,8 +146,58 @@ class ZoteroSemanticSearch:
             logger.error(f"Error processing fulltext for item {item_key}: {e}")
             return [], [], []
     
-    
-    def _create_chunks(self, text) -> Tuple[List[str], List[int]]:
+    def _get_fulltext(self, item: dict) -> str|None:
+        """
+        Get fulltext content for a Zotero item.
+        
+        Args:
+            item_key: Zotero item key
+            
+        Returns:
+            Fulltext content as string
+        """
+        item_key = item.get("key", "")
+                
+        # Try to get attachment details
+        attachment = get_attachment_details(self.zotero_client, item)
+        if not attachment:
+            logger.error(f"No attachment found for item with key: {item_key}")
+            return None
+                
+        # Try fetching full text from Zotero's full text index first
+        try:
+            full_text_data = self.zotero_client.fulltext_item(attachment.key)
+            if full_text_data and "content" in full_text_data and full_text_data["content"]:
+                logger.debug("Successfully retrieved full text from Zotero's index")
+                return full_text_data['content']
+        except Exception as fulltext_error:
+            logger.error(f"Couldn't retrieve indexed full text for item with key: {item_key}: {str(fulltext_error)}")
+        
+        # If we couldn't get indexed full text, try to download and convert the file
+        try:
+            logger.debug(f"Attempting to download and convert attachment {attachment.key} for item with key: {item_key}")
+            
+            # Download the file to a temporary location
+            import tempfile
+            import os
+            
+            with tempfile.TemporaryDirectory() as tmpdir:
+                file_path = os.path.join(tmpdir, attachment.filename or f"{attachment.key}.pdf")
+                self.zotero_client.dump(attachment.key, filename=os.path.basename(file_path), path=tmpdir)
+                
+                if os.path.exists(file_path):
+                    logger.debug(f"Downloaded file to {file_path} for item with key: {item_key}, converting to markdown")
+                    converted_text = convert_to_markdown(file_path)
+                    return converted_text
+                else:
+                    logger.error(f"File download failed for item with key: {item_key}.")
+                    return None
+        except Exception as e:
+            logger.error(f"Error downloading or converting attachment for item with key {item_key}: {e}")
+            return None
+                
+
+    def _create_chunks(self, text) -> Tuple[List[str], List[Tuple[int, int]]]:
         # Roughly 750 words per chunk, with 250 word overlap
         chunk_size = 1000
         overlap = 250
@@ -277,7 +325,7 @@ class ZoteroSemanticSearch:
             all_items = []
             
             while True:
-                batch_params = {"start": start, "limit": batch_size}
+                batch_params = {"start": start, "limit": batch_size, "itemType": "-attachment"}
                 if limit and len(all_items) >= limit:
                     break
                 
@@ -294,7 +342,7 @@ class ZoteroSemanticSearch:
                 all_items.extend(filtered_items)
                 start += batch_size
                 
-                if len(items) < batch_size:
+                if len(all_items) >= batch_size:
                     break
             
             if limit:
@@ -362,9 +410,9 @@ class ZoteroSemanticSearch:
                     stats["skipped"] += 1
                     continue
                 
-                documents.append(chunk_texts)
-                metadatas.append(chunk_metadatas)
-                ids.append(chunk_ids)
+                documents.extend(chunk_texts)
+                metadatas.extend(chunk_metadatas)
+                ids.extend(chunk_ids)
                 
                 stats["processed"] += 1
                 
